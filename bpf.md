@@ -18,3 +18,30 @@ bpftrace -e 'uprobe:/usr/local/nginx/sbin/nginx:ngx_close_connection
 ```
 bpftrace -e 'kprobe:function_name { actions }'
 ```
+### 查询挂载点
+```
+bpftrace -l
+```
+### .bt文件分析mysql
+bpftrace mysql_trace.bt
+```
+BEGIN
+{
+    printf("mysql begin, Hit Ctrl + C to end.\n");
+    printf("%-10s %-6s %6s %s\n","TIME(ms)","PID","MS","QUERY");
+}
+
+uprobe:/usr/sbin/mysqld:*dispatch_command*
+{
+    $dur = (nsecs - @start[tid]) /1000000;
+    time("%H:%M:%S ");
+    printf("%-6d %6d %s", pid, $dur, @query[tid]);
+    delete(@query[tid]);
+    delete(@start[tid]);
+}
+
+END
+{
+    printf("mysql end\n");
+}    
+```
