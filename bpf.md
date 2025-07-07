@@ -23,7 +23,9 @@ bpftrace -e 'kprobe:function_name { actions }'
 bpftrace -l
 ```
 ### .bt文件分析mysql
+```
 bpftrace mysql_trace.bt
+```
 ```
 BEGIN
 {
@@ -49,4 +51,22 @@ END
 {
     printf("mysql end\n");
 }    
+```
+### 动态库trace
+malloc 函数通常位于 GNU C Library (glibc) 中，动态库的文件名为 libc.so，该库通常存放在以下路径之一：
+- /lib/x86_64-linux-gnu/libc.so.6 （对于 64 位系统）
+- /lib/i386-linux-gnu/libc.so.6 （对于 32 位系统）
+#### .bt文件
+```
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc
+/ comm == "malloc"/
+{
+    printf("-->[%s] %d malloc \n", comm, pid);
+}
+
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:free
+/ comm == "malloc"/
+{
+    printf("[%s] %d free--> \n", comm, pid);
+}
 ```
