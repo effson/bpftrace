@@ -70,3 +70,15 @@ uprobe:/lib/x86_64-linux-gnu/libc.so.6:free
     printf("[%s] %d free--> \n", comm, pid);
 }
 ```
+测试代码：
+malloc.c
+```
+#include <stdlib.h>
+
+int main() {
+    void *p1 = malloc(10);
+    void *p2 = malloc(20);
+
+    free(p1);
+}
+```
