@@ -40,7 +40,7 @@ uretprobe:/usr/sbin/mysqld:*dispatch_command*
 {
     $dur = (nsecs - @start[tid]) /1000000;
     time("%H:%M:%S ");
-    printf("%-6d %6d %s", pid, $dur, @query[tid]);
+    printf("%-6d %6d %s\n", pid, $dur, @query[tid]);
     delete(@query[tid]);
     delete(@start[tid]);
 }
