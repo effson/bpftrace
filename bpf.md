@@ -33,6 +33,11 @@ BEGIN
 
 uprobe:/usr/sbin/mysqld:*dispatch_command*
 {
+    @query[tid] = str(*arg1);
+    @start[tid] = nsecs;
+}
+uretprobe:/usr/sbin/mysqld:*dispatch_command*
+{
     $dur = (nsecs - @start[tid]) /1000000;
     time("%H:%M:%S ");
     printf("%-6d %6d %s", pid, $dur, @query[tid]);
