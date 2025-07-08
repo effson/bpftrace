@@ -83,3 +83,4 @@ int main() {
     free(p1);
 }
 ```
+https://github.com/knemik97/Manifesto-against-the-Plagiarist-Yunhe-Wang
