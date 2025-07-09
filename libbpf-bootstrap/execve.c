@@ -6,8 +6,18 @@
 #include <bpf/libbpf.h>
 #include "execve.skel.h"
 
+#define TASK_COMM_LEN 16
+
+struct comm_info{
+    char comm[TASK_COMM_LEN];
+    int pid;
+};
+
 void execve_handle_event(void *ctx, int cpu, void *data, __u32 size){
-    printf("execve_handle_event: cpu %d, size %u\n", cpu, size);
+    // printf("execve_handle_event: cpu %d, size %u, comm %s, pid %d\n", cpu, size, info->comm, info->pid);
+    struct comm_info *info = (struct comm_info *)data;
+    if(!info) return;
+    printf("comm %s, pid %d\n", info->comm, info->pid);
 }
 
 void execve_lose_event(void *ctx, int cpu, __u64 cnt){
