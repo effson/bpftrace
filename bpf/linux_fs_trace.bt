@@ -1,65 +1,135 @@
 #!/usr/bin/env bpftrace
+#!/usr/bin/env bpftrace
 
 BEGIN {
-    printf("Tracing mkdir/read syscalls to filesystem layer... Hit Ctrl-C to stop.\n");
+    printf("Tracing filesystem... Hit Ctrl-C to stop.\n");
 }
 
-/* 1. 跟踪 mkdir 系统调用路径 */
-tracepoint:syscalls:sys_enter_mkdir* 
+uprobe:/home/jeff/test_io:main
 {
-    @mkdir_enter[tid] = 1;
-    printf("\n[PID %d] mkdir('%s', mode=0%o)\n", pid, str(args->pathname), args->mode);
+    printf("==> main() entered\n");
 }
 
-kprobe:vfs_mkdir 
+tracepoint:syscalls:sys_enter_openat
+/comm == "test_io" /
 {
-    if (@mkdir_enter[tid]) {
-        printf("  -> VFS: vfs_mkdir (dentry: %s)\n", str(arg1->d_name.name));
-        @vfs_mkdir[tid] = 1;
-    }
+    printf("[syscall] openat(O_CREAT): filename = %s, mode = 0%o\n", str(args->filename), args->mode);
 }
 
-/* 根据您的文件系统类型调整（如 ext4_mkdir, xfs_mkdir 等） */
-kprobe:ext4_mkdir 
+kprobe:do_sys_openat2
+/comm == "test_io"/
 {
-    if (@vfs_mkdir[tid]) {
-        printf("  -> FS: ext4_mkdir (inode=%llu)\n", arg1);
-        print_stack();
-        delete(@vfs_mkdir[tid]);
-        delete(@mkdir_enter[tid]);
-    }
+    printf("[kernel] do_sys_openat2(dfd: %d, filename: %s, how: %p)\n", arg0, str(arg1), arg2);
 }
 
-/* 2. 跟踪 read 系统调用路径 */
-tracepoint:syscalls:sys_enter_read 
-/fd/ 
+kprobe:do_filp_open
+/comm == "test_io"/
 {
-    @read_enter[tid] = fd;
-    printf("\n[PID %d] read(fd=%d, size=%d)\n", pid, args->fd, args->count);
+    printf("[kernel] do_filp_open(dfd: %d, pathname: %p, open_flags: %p)\n", arg0, arg1, arg2);
 }
 
-kprobe:vfs_read 
+kprobe:path_openat
+/comm == "test_io"/
 {
-    if (@read_enter[tid]) {
-        printf("  -> VFS: vfs_read (file=%p)\n", arg0);
-        @vfs_read[tid] = 1;
-    }
+    printf("[kernel] path_openat(nd: %p, open_flags: %p, file: %p)\n", arg0, arg1, arg2);
 }
 
-/* 根据您的文件系统类型调整（如 ext4_file_read_iter） */
-kprobe:ext4_file_read_iter 
+kprobe:open_last_lookups
+/comm == "test_io"/
 {
-    if (@vfs_read[tid]) {
-        printf("  -> FS: ext4_file_read_iter (iocb=%p)\n", arg0);
-        print_stack();
-        delete(@vfs_read[tid]);
-        delete(@read_enter[tid]);
-    }
+    printf("[kernel] open_last_lookups(nd: %p, file: %p, open_flags: %p)\n", arg0, arg1, arg2);
 }
 
-END {
-    clear(@mkdir_enter);
-    clear(@vfs_mkdir);
-    clear(@read_enter);
-    clear(@vfs_read);
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:read
+/comm == "test_io"/
+{
+    printf("[user_space] glibc read(fd = %d, buf = %p, count = %d)\n", arg0, arg1, arg2);
 }
+
+tracepoint:syscalls:sys_enter_read
+/comm == "test_io"/
+{
+    printf("[syscall] read(fd: %d, count: %d)\n", args->fd, args->count);
+}
+
+tracepoint:syscalls:sys_enter_write
+/comm == "test_io"/
+{
+    printf("[syscall] write(fd: %d, count: %d)\n", args->fd, args->count);
+}
+
+kprobe:vfs_create
+/comm == "test_io"/
+{
+    printf("[vfs] vfs_create(dir: %p, dentry: %p, mode: 0x%x, excl: %d)\n", arg0, arg1, arg2, arg3);
+}
+
+kprobe:vfs_read
+/comm == "test_io"/
+{
+    printf("[vfs] vfs_read(file: %p, buf: %p, count: %lu)\n", arg0, arg1, arg2);
+}
+
+kprobe:vfs_write
+/comm == "test_io"/
+{
+    printf("[vfs] vfs_write(file: %p, count: %lu)\n", arg0, arg2);
+}
+
+kprobe:ext4_create
+/comm == "test_io"/
+{
+    printf("[ext4] ext4_create(dir: %p, dentry: %p, mode: 0x%x, excl: %d)\n", arg0, arg1, arg2, arg3);
+}
+
+kprobe:ext4_file_read_iter
+/comm == "test_io"/
+{
+    printf("[ext4] ext4_file_read_iter(file: %p, iter: %p)\n", arg0, arg1);
+}
+
+kprobe:ext4_file_write_iter
+/comm == "test_io"/
+{
+    printf("[ext4] ext4_file_write_iter()\n");
+}
+
+kprobe:filemap_read
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_read(file: %p, iter: %p)\n", arg0, arg1);
+}
+
+kprobe:mpage_readahead
+/comm == "test_io"/
+{
+    printf("[page cache miss] mpage_readahead(mapping: %p, ra: %p, filp: %p, page: %p, nr: %lu)\n",
+            arg0, arg1, arg2, arg3, arg4);
+}
+
+kprobe:block_write_begin
+/comm == "test_io"/
+{
+    printf("[cache] block_write_begin()\n");
+}
+
+kprobe:ext4_writepages
+/comm == "test_io"/
+{
+    printf("[ext4] ext4_writepages (flush dirty pages)\n");
+}
+
+kprobe:submit_bio
+/comm == "test_io"/
+{
+    // bio->bi_opf 位于 bio 结构体偏移位置随内核版本可能不同
+    // 简化处理，不解码 opf，只输出 bio 地址
+    printf("[blk] submit_bio(bio: %p)\n", arg0);
+}
+
+kprobe:blk_mq_submit_bio
+/comm == "test_io"/
+{
+    printf("[blk] blk_mq_submit_bio()\n");
+}
+
