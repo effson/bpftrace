@@ -1,0 +1,65 @@
+#!/usr/bin/env bpftrace
+
+BEGIN {
+    printf("Tracing mkdir/read syscalls to filesystem layer... Hit Ctrl-C to stop.\n");
+}
+
+/* 1. 跟踪 mkdir 系统调用路径 */
+tracepoint:syscalls:sys_enter_mkdir* 
+{
+    @mkdir_enter[tid] = 1;
+    printf("\n[PID %d] mkdir('%s', mode=0%o)\n", pid, str(args->pathname), args->mode);
+}
+
+kprobe:vfs_mkdir 
+{
+    if (@mkdir_enter[tid]) {
+        printf("  -> VFS: vfs_mkdir (dentry: %s)\n", str(arg1->d_name.name));
+        @vfs_mkdir[tid] = 1;
+    }
+}
+
+/* 根据您的文件系统类型调整（如 ext4_mkdir, xfs_mkdir 等） */
+kprobe:ext4_mkdir 
+{
+    if (@vfs_mkdir[tid]) {
+        printf("  -> FS: ext4_mkdir (inode=%llu)\n", arg1);
+        print_stack();
+        delete(@vfs_mkdir[tid]);
+        delete(@mkdir_enter[tid]);
+    }
+}
+
+/* 2. 跟踪 read 系统调用路径 */
+tracepoint:syscalls:sys_enter_read 
+/fd/ 
+{
+    @read_enter[tid] = fd;
+    printf("\n[PID %d] read(fd=%d, size=%d)\n", pid, args->fd, args->count);
+}
+
+kprobe:vfs_read 
+{
+    if (@read_enter[tid]) {
+        printf("  -> VFS: vfs_read (file=%p)\n", arg0);
+        @vfs_read[tid] = 1;
+    }
+}
+
+/* 根据您的文件系统类型调整（如 ext4_file_read_iter） */
+kprobe:ext4_file_read_iter 
+{
+    if (@vfs_read[tid]) {
+        printf("  -> FS: ext4_file_read_iter (iocb=%p)\n", arg0);
+        print_stack();
+        delete(@vfs_read[tid]);
+        delete(@read_enter[tid]);
+    }
+}
+
+END {
+    clear(@mkdir_enter);
+    clear(@vfs_mkdir);
+    clear(@read_enter);
+    clear(@vfs_read);
+}
