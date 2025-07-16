@@ -1,5 +1,4 @@
 #!/usr/bin/env bpftrace
-#!/usr/bin/env bpftrace
 
 BEGIN {
     printf("Tracing filesystem... Hit Ctrl-C to stop.\n");
@@ -7,7 +6,32 @@ BEGIN {
 
 uprobe:/home/jeff/test_io:main
 {
-    printf("==> main() entered\n");
+    printf("==> main() entered====================================\n");
+}
+
+uprobe:/home/jeff/test_io:uflush
+{
+    printf("==> flush() entered===================================\n");
+}
+
+uprobe:/home/jeff/test_io:uwrite
+{
+    printf("==> write() entered====================================\n");
+}
+
+uprobe:/home/jeff/test_io:uread
+{
+    printf("==> read() entered====================================\n");
+}
+
+uprobe:/home/jeff/test_io:ucreate
+{
+    printf("==> create() entered===================================\n");
+}
+
+uprobe:/home/jeff/test_io:uopen
+{
+    printf("==> open() entered=====================================\n");
 }
 
 tracepoint:syscalls:sys_enter_openat
@@ -133,3 +157,67 @@ kprobe:blk_mq_submit_bio
     printf("[blk] blk_mq_submit_bio()\n");
 }
 
+kprobe:blk_mq_dispatch_rq_list
+/comm == "test_io" /
+{
+     printf("[blk] blk_mq_dispatch_rq_list()\n");
+}
+
+kprobe:blk_mq_run_hw_queue
+/comm == "test_io" /
+{
+     printf("[blk] blk_mq_run_hw_queue(queue: %p)\n", arg0); 
+}
+
+tracepoint:block:block_rq_complete
+/comm == "test_io" /
+{
+    printf("[block] complete: dev %d:%d, sector: %llu, len: %u, rwbs: %s\n",
+        args->dev >> 20, args->dev & ((1 << 20) - 1),
+        args->sector, args->nr_sector, args->rwbs);
+}
+
+tracepoint:block:block_rq_issue
+/comm == "test_io" /
+{
+    printf("[block] issue: dev %d:%d, sector: %llu, len: %u, rwbs: %s\n",
+        args->dev >> 20, args->dev & ((1 << 20) - 1),
+        args->sector, args->nr_sector, args->rwbs);
+}
+
+kprobe:generic_file_read_iter
+/comm == "test_io"/
+{
+    printf("[vfs] generic_file_read_iter(iocb: %p, iter: %p)\n", arg0, arg1);
+}
+
+kprobe:generic_perform_write
+/comm == "test_io"/
+{
+    printf("[vfs] generic_perform_write(file: %p, iov_iter: %p, pos: %llu)\n",
+           arg0, arg1, arg2);
+}
+
+kprobe:generic_file_write_iter
+/comm == "test_io"/
+{
+    printf("[vfs] generic_file_write_iter(iocb: %p, iov_iter: %p)\n", arg0, arg1);
+}
+
+tracepoint:syscalls:sys_enter_fsync
+/comm == "test_io"/
+{
+    printf("[syscall] fsync(fd: %d)\n", args->fd);
+}
+
+kprobe:vfs_fsync
+/comm == "test_io"/
+{
+    printf("[vfs] vfs_fsync(file: %p)\n", arg0);
+}
+
+kprobe:ext4_sync_file
+/comm == "test_io"/
+{
+    printf("[ext4] ext4_sync_file(file: %p, datasync: %d)\n", arg0, arg1);
+}
