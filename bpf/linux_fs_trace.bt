@@ -76,6 +76,8 @@ tracepoint:syscalls:sys_enter_read
     printf("[syscall] read(fd: %d, count: %d)\n", args->fd, args->count);
 }
 
+
+
 tracepoint:syscalls:sys_enter_write
 /comm == "test_io"/
 {
@@ -116,6 +118,78 @@ kprobe:ext4_file_write_iter
 /comm == "test_io"/
 {
     printf("[ext4] ext4_file_write_iter()\n");
+}
+
+kprobe:filemap_get_pages
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_get_pages\n");
+}
+
+kprobe:filemap_get_read_batch
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_get_read_batch\n");
+}
+
+kprobe:page_cache_sync_ra
+/comm == "test_io"/
+{
+    printf("[page cache] page_cache_sync_ra\n");
+}
+
+kprobe:force_page_cache_ra
+/comm == "test_io"/
+{
+    printf("[page cache] force_page_cache_ra\n");
+}
+
+kprobe:page_cache_ra_unbounded
+/comm == "test_io"/
+{
+    printf("[page cache] page_cache_ra_unbounded\n");
+}
+
+kprobe:read_pages
+/comm == "test_io"/
+{
+    printf("[page cache] read_pages\n");
+}
+
+kprobe:filemap_add_folio
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_add_folio\n");
+}
+
+kprobe:__filemap_add_folio
+/comm == "test_io"/
+{
+    printf("[page cache] __filemap_add_folio\n");
+}
+
+kprobe:ext4_read_folio
+/comm == "test_io"/
+{
+    printf("[page cache] ext4_read_folio\n");
+}
+
+kprobe:do_read_cache_folio
+/comm == "test_io"/
+{
+    printf("[page cache] do_read_cache_folio\n");
+}
+
+kprobe:filemap_update_page
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_update_page\n");
+}
+
+kprobe:filemap_read_folio
+/comm == "test_io"/
+{
+    printf("[page cache] filemap_read_folio\n");
 }
 
 kprobe:filemap_read
