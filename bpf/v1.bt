@@ -1,0 +1,73 @@
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("Tracing NVMe cmd latency for COMM=xfskv_test (Ctrl-C to end)\n");
+  @name[0x00] = "FLUSH";
+  @name[0x01] = "WRITE";
+  @name[0x02] = "READ";
+  @has_first = 0;
+}
+
+// 只在提交点按进程名过滤并“打标”
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  @start[$key]  = nsecs;
+  @mark[$key]   = 1;
+  @opcode[$key] = args->opcode;
+
+  @cnt_total = count();
+  @cnt_by_op[args->opcode] = count();
+
+  // 第一次命中时记录窗口起点
+  if (@has_first == 0) {
+    @has_first = 1;
+    @first_ts = nsecs;
+  }
+}
+
+// 完成点：不看 comm，只配对我们打过标的命令
+tracepoint:nvme:nvme_complete_rq
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  if (@mark[$key]) {
+    $us = (nsecs - @start[$key]) / 1000;
+
+    @all = hist($us);
+    $op = @opcode[$key];
+    if     ($op == 0) { @flush = hist($us); }
+    else if($op == 1) { @write = hist($us); }
+    else if($op == 2) { @read  = hist($us); }
+
+    // 每次完成都刷新“窗口结束时间”
+    @last_ts = nsecs;
+
+    delete(@start[$key]);
+    delete(@mark[$key]);
+    delete(@opcode[$key]);
+  }
+}
+
+END
+{
+  printf("\n=== ALL ===\n");   print(@all);
+  printf("\n--- WRITE ---\n"); print(@write);
+  printf("\n--- FLUSH ---\n"); print(@flush);
+  printf("\n--- READ  ---\n"); print(@read);
+
+  printf("\nCounts: total="); print(@cnt_total);
+  printf("By opcode: ");       print(@cnt_by_op);
+
+  if (@has_first && @last_ts > @first_ts) {
+    $delta_ns  = @last_ts - @first_ts;          // 纳秒
+    $ms_whole  = $delta_ns / 1000000;           // 毫秒整数部分
+    $ms_frac   = ($delta_ns % 1000000) / 1000;  // 取余转成微秒的千分之一（即小数三位）
+
+    printf("\n*** 64MiB 窗口时延: %llu.%03llu ms ***\n",
+           $ms_whole, $ms_frac);
+  } else {
+    printf("\n[warn] 未捕获到窗口，请检查过滤/挂载点\n");
+  }
+}
