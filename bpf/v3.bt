@@ -1,0 +1,69 @@
+#!/usr/bin/env bpftrace
+// 逐条打印 + 批次窗口统计（只追踪 xfskv_test）
+// 批次定义：inflight 从 0 -> 正数 -> 回到 0
+
+BEGIN
+{
+  printf("epoch_ns,wall_time,ctrl_id,qid,cid,opcode,lat_us\n");
+  @inflight = 0;
+  @batch_open = 0;
+  @max_lat_us = 0;
+}
+
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+
+  // 批次开始：inflight 从 0 -> 1
+  if (@inflight == 0) {
+    @batch_open = 1;
+    @first_ts = nsecs;
+    @max_lat_us = 0;
+  }
+  @inflight = @inflight + 1;
+
+  @start[$key]  = nsecs;
+  @mark[$key]   = 1;
+  @opcode[$key] = args->opcode;
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  if (@mark[$key]) {
+    $start = @start[$key];
+    if ($start) {
+      $now_ns = nsecs;
+      $lat_us = ($now_ns - $start) / 1000;
+      $op     = (uint32)@opcode[$key];
+
+      // 逐条 CSV
+      $secstr = strftime("%H:%M:%S", $now_ns);
+      $usec   = ($now_ns / 1000) % 1000000;
+      printf("%llu,%s.%06llu,%u,%u,%u,%u,%llu\n",
+             $now_ns, $secstr, $usec,
+             args->ctrl_id, args->qid, args->cid, $op, $lat_us);
+
+      // 本批最大单条时延
+      if ($lat_us > @max_lat_us) { @max_lat_us = $lat_us; }
+      @last_ts = $now_ns;
+    }
+
+    // 清理配对状态
+    delete(@start[$key]);
+    delete(@mark[$key]);
+    delete(@opcode[$key]);
+
+    // 批次结束：inflight 递减到 0，打印窗口统计
+    @inflight = @inflight - 1;
+    if (@batch_open == 1 && @inflight == 0) {
+      $delta_ns  = @last_ts - @first_ts;
+      $ms_whole  = $delta_ns / 1000000;
+      $ms_frac   = ($delta_ns % 1000000) / 1000;  // 小数 3 位
+      printf("*** batch window: %llu.%03llu ms, max_io_latency: %llu us ***\n",
+             $ms_whole, $ms_frac, @max_lat_us);
+      @batch_open = 0;
+    }
+  }
+}
