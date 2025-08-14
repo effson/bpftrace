@@ -1,0 +1,43 @@
+#!/usr/bin/env bpftrace
+// 逐条打印 xfskv_test 发起的 NVMe 命令完成时间与时延（us）
+
+BEGIN
+{
+  printf("epoch_ns,wall_time,ctrl_id,qid,cid,opcode,lat_us\n");
+}
+
+// 只在提交点按进程名过滤并打标
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  @start[$key]  = nsecs;          // 提交时间(ns)
+  @mark[$key]   = 1;              // 标记来自 xfskv_test
+  @opcode[$key] = args->opcode;   // 记录 opcode（0=FLUSH,1=WRITE,2=READ）
+}
+
+// 完成点：不再看 comm，只处理打过标的命令
+tracepoint:nvme:nvme_complete_rq
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  if (@mark[$key]) {
+    $start = @start[$key];
+    if ($start) {
+      $now_ns = nsecs;
+      $lat_us = ($now_ns - $start) / 1000;
+      $op     = (uint32)@opcode[$key];
+
+      // 组成“墙钟 HH:MM:SS.uuuuuu”（strftime 给到秒，后面补 6 位微秒）
+      $secstr = strftime("%H:%M:%S", $now_ns);
+      $usec   = ($now_ns / 1000) % 1000000;
+
+      // CSV：epoch_ns,wall_time,ctrl_id,qid,cid,opcode,lat_us
+      printf("%llu,  %s.%06llu,  %u,  %u,  %u,  %u,  %llu\n",
+             $now_ns, $secstr, $usec,
+             args->ctrl_id, args->qid, args->cid, $op, $lat_us);
+    }
+    delete(@start[$key]);
+    delete(@mark[$key]);
+    delete(@opcode[$key]);
+  }
+}
