@@ -1,0 +1,44 @@
+#!/usr/bin/env bpftrace
+
+BEGIN { printf("Per-iteration window by fsync/close (COMM=xfskv_test)\n"); }
+
+tracepoint:nvme:nvme_setup_cmd / comm=="xfskv_test" /
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  if (@first_ts[pid] == 0) { @first_ts[pid] = nsecs; }
+  @start[$key] = nsecs;
+  @owner[$key] = pid;
+  @seen_io[pid] = 1;
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+  $key = (args->ctrl_id, args->qid, args->cid);
+  $p = @owner[$key];
+  $pt = @start[$key];
+  if ($p && $pt) {
+    $now = nsecs;
+    $lat = ($now - $pt) / 1000;
+    @last_ts[$p] = $now;
+    if ($lat > @max_lat_us[$p]) { @max_lat_us[$p] = $lat; }
+    delete(@owner[$key]); delete(@start[$key]);
+  }
+}
+
+// fsync 或 close 作为“迭代结束”的锚点（任选其一或都保留）
+tracepoint:syscalls:sys_exit_fsync / comm=="xfskv_test" && @seen_io[pid] == 1 /
+{
+  $dt = 0;
+  if (@last_ts[pid] > @first_ts[pid] && @first_ts[pid] != 0) {
+    $dt = (int64)@last_ts[pid] - (int64)@first_ts[pid];
+  }
+  $ms_whole = (uint64)$dt / 1000000;
+  $ms_frac  = ((uint64)$dt % 1000000) / 1000;
+
+  printf("PID=%d ITER window=%llu.%03llu ms   written=%llu MB (by fsync)\n",
+         pid, $ms_whole, $ms_frac, $mb);
+
+  // 清理本迭代
+  delete(@first_ts[pid]); delete(@last_ts[pid]);
+  delete(@max_lat_us[pid]); delete(@seen_io[pid]);
+}
