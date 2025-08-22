@@ -53,3 +53,11 @@ END
     clear(@start);
     clear(@io_count);
 }
+
+nvme.bt:45:8-19: ERROR: Type mismatch for '>': comparing 'count' with 'int64'
+    if ($count > 0) {
+       ~~~~~~~~~~~
+nvme.bt:46:23-38: ERROR: Type mismatch for '/': comparing 'sum' with 'count'
+        $avg_lat_us = $total / $count;
+                      ~~~~~~~~~~~~~~~
+nvme.bt:47-48: ERROR: printf: %d specifier expects a value of type integer (count supplied)
