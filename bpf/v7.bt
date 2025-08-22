@@ -1,0 +1,55 @@
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("COMM=xfskv_test\n");
+}
+
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+    $ctrl_id = args->ctrl_id;
+    $qid = args->qid;
+    $cid = args->cid;
+
+    @start[$ctrl_id, $qid, $cid]  = nsecs;
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+    $ctrl_id = args->ctrl_id;
+    $qid = args->qid;
+    $cid = args->cid;
+    $pt = @start[$ctrl_id, $qid, $cid];
+    if ($pt) {
+        $lat = (nsecs - $pt);
+        @total_lat_us[0] = sum($lat);
+        @io_count[0] = count();
+        delete(@start[$ctrl_id, $qid, $cid]);
+    }
+}
+
+tracepoint:syscalls:sys_exit_close
+/ comm=="xfskv_test"/
+{
+    // 检查是否有数据，避免除以零
+    $io_count_val = @io_count[0];
+    $total_lat_val = @total_lat_us[0];
+    if ($io_count_val > 0) {
+        $avg_lat_us = $total_lat_val / $io_count_val;
+        printf("I/O Count: %-10d | Avg Lat: %-10d ns\n",
+               $io_count_val, $avg_lat_us);
+    } else {
+        printf("I/O Count: %-10d\n", 0);
+    }
+
+    clear(@total_lat_us);
+    clear(@io_count);
+}
+
+END
+{
+    clear(@total_lat_us);
+    clear(@start);
+    clear(@io_count);
+}
