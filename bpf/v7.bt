@@ -54,10 +54,146 @@ END
     clear(@io_count);
 }
 
-nvme.bt:45:8-19: ERROR: Type mismatch for '>': comparing 'count' with 'int64'
-    if ($count > 0) {
-       ~~~~~~~~~~~
-nvme.bt:46:23-38: ERROR: Type mismatch for '/': comparing 'sum' with 'count'
-        $avg_lat_us = $total / $count;
-                      ~~~~~~~~~~~~~~~
-nvme.bt:47-48: ERROR: printf: %d specifier expects a value of type integer (count supplied)
+### 2.
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("COMM=xfskv_test\n");
+}
+
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+    $ctrl_id = args->ctrl_id;
+    $qid = args->qid;
+    $cid = args->cid;
+
+    @start[$ctrl_id, $qid, $cid]  = nsecs;
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+    $ctrl_id = args->ctrl_id;
+    $qid = args->qid;
+    $cid = args->cid;
+    $pt = @start[$ctrl_id, $qid, $cid];
+    if ($pt) {
+        $lat_ns = (nsecs - $pt);
+        @io_cnt[pid]  = @io_cnt[pid]  + 1;
+        @tot_lat_ns[pid] = @tot_lat_ns[pid] + $lat_ns;
+        delete(@start[$ctrl_id, $qid, $cid]);
+    }
+}
+
+tracepoint:syscalls:sys_exit_close
+/ comm == "xfskv_test" /
+{
+    // 检查是否有数据，避免除以零
+    $cnt = @io_cnt[pid];
+    $sum = @tot_lat_ns[pid];
+
+    if ($cnt > 0) {
+        $avg_ns = $sum / $cnt;
+        printf("pid=%d, I/O Count: %-10d | Avg Lat: %-10d ns\n", pid,
+               $cnt, $avg_ns);
+        delete(@io_cnt[pid]);
+        delete(@tot_lat_ns[pid]);
+    } else {
+        printf("pid=%d,I/O Count: %-10d\n", pid, 0);
+    }
+}
+
+END
+{
+    clear(@start);
+    clear(@io_cnt);
+    clear(@tot_lat_ns);
+}
+
+### 3.
+
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("COMM=xfskv_test\n");
+}
+
+kprobe:iomap_dio_rw
+/ comm == "xfskv_test" /
+{
+    @dio_seq[tid] = @dio_seq[tid] + 1;
+    @dio_cur[tid] = @dio_seq[tid];
+    @dio_fs_t0[tid, @dio_cur[tid]] = nsecs;
+}
+
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{   
+    $d = @dio_cur[tid];
+    if ($d > 0) {
+        $ctrl_id = args->ctrl_id;
+        $qid = args->qid;
+        $cid = args->cid;
+        @start[tid, $d, args->ctrl_id, args->qid, args->cid] = nsecs;
+        @cmd_owner_tid[$ctrl_id, $qid, $cid] = tid;
+        @cmd_owner_dio[$ctrl_id, $qid, $cid] = $d;     
+    }
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+    $ctrl_id = args->ctrl_id;
+    $qid = args->qid;
+    $cid = args->cid;
+    $t = @cmd_owner_tid[$ctrl_id, $qid, $cid];
+    $d = @cmd_owner_dio[$ctrl_id, $qid, $cid];
+    $t1 = @start[$t, $d, $ctrl_id, $qid, $cid];
+    if ($t && $d && $t1) {
+        $lat_ns = nsecs - $t1;
+        @dio_cnt[$t, $d]  = @dio_cnt[$t, $d]  + 1;
+        @tot_lat_ns[$t, $d] = @tot_lat_ns[$t, $d] + $lat_ns;
+        delete(@start[$t, $d, $ctrl_id, $qid, $cid]);
+        delete(@cmd_owner_tid[$ctrl_id, $qid, $cid]);
+        delete(@cmd_owner_dio[$ctrl_id, $qid, $cid]);
+    }
+}
+
+kretprobe:iomap_dio_rw
+/ comm == "xfskv_test" && @dio_cur[tid] > 0 /
+{
+    $d = @dio_cur[tid];
+    $ret = retval;                        // >=0 同步完成
+    $fs_e2e = nsecs - @dio_fs_t0[tid, $d];  
+    printf("[DIO] tid=%d dio=%d bytes=%ld | fs_e2e=%ld ns\n",
+         tid, $d, $ret, $fs_e2e);  
+}
+
+tracepoint:syscalls:sys_exit_close
+/ comm=="xfskv_test"/
+{
+    $d = @dio_cur[tid];
+    $cnt = @dio_cnt[tid, $d];
+    $avg = ($cnt > 0) ? (@tot_lat_ns[tid, $d] / $cnt) : 0;
+
+    printf("[DIO] tid=%d dio=%d | Num of cmds=%d avg_cmd=%ld ns\n",
+         tid, $d, $cnt, $avg);
+
+    delete(@dio_fs_t0[tid, $d]); 
+    delete(@dio_cnt[tid, $d]); 
+    delete(@tot_lat_ns[tid, $d]);
+    @dio_cur[tid] = 0;
+}
+
+END
+{
+    clear(@start);
+    clear(@dio_cnt);
+    clear(@tot_lat_ns);
+    clear(@dio_seq);
+    clear(@dio_fs_t0);
+    clear(@dio_cur);
+    clear(@cmd_owner_tid);
+    clear(@cmd_owner_dio);
+}
