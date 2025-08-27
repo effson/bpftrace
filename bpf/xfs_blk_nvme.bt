@@ -1,0 +1,148 @@
+#!/usr/bin/env bpftrace
+
+BEGIN
+{
+  printf("COMM=xfskv_test\n");
+}
+
+kprobe:iomap_dio_rw
+/ comm == "xfskv_test" /
+{
+    @dio_seq[tid] = @dio_seq[tid] + 1;
+    @dio_cur[tid] = @dio_seq[tid];
+    @dio_fs_t0[pid, tid, @dio_cur[tid]] = nsecs;
+}
+
+tracepoint:nvme:nvme_setup_cmd
+/ comm == "xfskv_test" /
+{
+    $d = @dio_cur[tid];
+    if ($d > 0) {
+        $C = args->ctrl_id; $Q = args->qid; $I = args->cid;
+        @nvme_start[pid, tid, $d, $C, $Q, $I] = nsecs;
+        @nvme_owner_pid[$C, $Q, $I] = pid;
+        @nvme_owner_tid[$C, $Q, $I] = tid;
+        @nvme_owner_dio[$C, $Q, $I] = $d;
+    }
+}
+
+tracepoint:nvme:nvme_complete_rq
+{
+    $C = args->ctrl_id; $Q = args->qid; $I = args->cid;
+    $pp = @nvme_owner_pid[$C,$Q,$I];
+    $pt = @nvme_owner_tid[$C,$Q,$I];
+    $dio = @nvme_owner_dio[$C,$Q,$I];
+    $t0  = @nvme_start[$pp,$pt,$dio,$C,$Q,$I];
+    if ($pp && $pt && $dio && $t0) {
+        $lat = nsecs - $t0;
+        @proc_nvme_cnt[$pp] = @proc_nvme_cnt[$pp] + 1;
+        @proc_nvme_lat[$pp] = @proc_nvme_lat[$pp] + $lat;
+        @dio_nvme_cnt[$pp,$dio] = @dio_nvme_cnt[$pp,$dio] + 1;
+        @dio_nvme_lat[$pp,$dio] = @dio_nvme_lat[$pp,$dio] + $lat;
+
+        delete(@nvme_start[$pp,$pt,$dio,$C,$Q,$I]);
+        delete(@nvme_owner_pid[$C,$Q,$I]);
+        delete(@nvme_owner_tid[$C,$Q,$I]);
+        delete(@nvme_owner_dio[$C,$Q,$I]);
+    }
+}
+
+tracepoint:block:block_rq_issue
+{
+    // 记录起点 & 所属进程；key 用 (dev, sector, bytes)
+    @blk_t0[args->dev, args->sector, args->bytes]    = nsecs;
+    @blk_owner_pid[args->dev, args->sector, args->bytes] = pid;
+
+    // 若当前线程有活跃的 DIO，顺带打上 DIO 标签（best-effort）
+    $d = @dio_cur[tid];
+    if ($d > 0) {
+        @blk_owner_dio[args->dev, args->sector, args->bytes] = $d;
+    }
+}
+
+tracepoint:block:block_rq_complete
+{
+    // 复原 bytes：用 nr_sector * 逻辑扇区大小
+    $bytes = (uint64)args->nr_sector * 512;
+
+    $t0 = @blk_t0[args->dev, args->sector, $bytes];
+    if ($t0) {
+        $dt = nsecs - $t0;
+
+        $pp = @blk_owner_pid[args->dev, args->sector, $bytes];
+        if ($pp) {
+            @proc_blk_cnt[$pp]   = @proc_blk_cnt[$pp] + 1;
+            @proc_blk_lat[$pp]   = @proc_blk_lat[$pp] + $dt;
+            @proc_blk_bytes[$pp] = @proc_blk_bytes[$pp] + $bytes;
+        }
+
+        $dio = @blk_owner_dio[args->dev, args->sector, $bytes];
+        if ($pp && $dio) {
+            @dio_blk_cnt[$pp,$dio]   = @dio_blk_cnt[$pp,$dio] + 1;
+            @dio_blk_lat[$pp,$dio]   = @dio_blk_lat[$pp,$dio] + $dt;
+            @dio_blk_bytes[$pp,$dio] = @dio_blk_bytes[$pp,$dio] + $bytes;
+        }
+
+        delete(@blk_t0[args->dev, args->sector, $bytes]);
+        delete(@blk_owner_pid[args->dev, args->sector, $bytes]);
+        delete(@blk_owner_dio[args->dev, args->sector, $bytes]);
+    }
+}
+
+kretprobe:iomap_dio_rw
+/ comm == "xfskv_test" && @dio_cur[tid] > 0 /
+{
+    $d   = @dio_cur[tid];
+    $t0  = @dio_fs_t0[pid, tid, $d];
+    $ret = retval;
+    if ($t0) {
+        $e2e = nsecs - $t0;
+        if ($ret >= 0) {
+            printf("[DIO] pid=%d tid=%d dio=%d bytes=%ld | fs_e2e=%ld ns\n",
+                   pid, tid, $d, $ret, $e2e);
+        } else {
+            printf("[DIO] pid=%d tid=%d dio=%d async_ret=%ld | fs_e2e=%ld ns\n",
+                   pid, tid, $d, $ret, $e2e);
+        }
+    }
+}
+
+tracepoint:syscalls:sys_exit_close
+/ comm == "xfskv_test" /
+{
+    $nc = @proc_nvme_cnt[pid]; $nl = @proc_nvme_lat[pid];
+    if ($nc > 0) {printf("[PROC] pid=%d NVMe cmds=%d avg=%ld ns\n", pid, $nc, $nl/$nc);}
+
+    $bc = @proc_blk_cnt[pid]; $bl = @proc_blk_lat[pid]; $bb = @proc_blk_bytes[pid];
+    if ($bc > 0) {printf("[PROC] pid=%d BLK  cmds=%d avg=%ld ns | bytes=%ld avg_sz=%ld\n",
+                        pid, $bc, $bl/$bc, $bb, $bc>0 ? $bb/$bc : 0);}
+
+    $d = @dio_cur[tid];
+    if ($d > 0) {
+        $dc = @dio_nvme_cnt[pid, $d]; $dl = @dio_nvme_lat[pid, $d];
+        if ($dc > 0){ printf("[DIO ] pid=%d dio=%d | NVMe cmds=%d avg=%ld ns\n", pid, $d, $dc, $dl/$dc);}
+
+        $bc2 = @dio_blk_cnt[pid, $d]; $bl2 = @dio_blk_lat[pid, $d]; $bb2 = @dio_blk_bytes[pid, $d];
+        if ($bc2 > 0) {printf("[DIO ] pid=%d dio=%d | BLK  cmds=%d avg=%ld ns | bytes=%ld avg_sz=%ld\n",
+                             pid, $d, $bc2, $bl2/$bc2, $bb2, $bc2>0 ? $bb2/$bc2 : 0);}
+
+        delete(@dio_fs_t0[pid, tid, $d]);
+        delete(@dio_nvme_cnt[pid, $d]); delete(@dio_nvme_lat[pid, $d]);
+        delete(@dio_blk_cnt[pid, $d]);  delete(@dio_blk_lat[pid, $d]); delete(@dio_blk_bytes[pid, $d]);
+        @dio_cur[tid] = 0;
+    }
+}
+
+END
+{
+    print(@proc_blk_cnt);
+    clear(@nvme_start); clear(@nvme_owner_pid); clear(@nvme_owner_tid); clear(@nvme_owner_dio);
+    clear(@proc_nvme_cnt); clear(@proc_nvme_lat);
+    clear(@dio_nvme_cnt);  clear(@dio_nvme_lat);
+
+    clear(@proc_blk_cnt); clear(@proc_blk_lat); clear(@proc_blk_bytes);
+    clear(@dio_blk_cnt);  clear(@dio_blk_lat);  clear(@dio_blk_bytes);
+
+    clear(@blk_t0); clear(@blk_owner_pid); clear(@blk_owner_dio);
+    clear(@dio_seq); clear(@dio_cur); clear(@dio_fs_t0);
+}
